@@ -1,0 +1,1033 @@
+---
+title: "Statistical Analysis of Proteomics data"
+author: "Frank Stein, Nils Kurzawa and Bernd Klaus"
+date: "`r doc_date()`"
+output: 
+    BiocStyle::pdf_document:
+        toc: true
+    BiocStyle::html_document:
+        toc: true
+        toc_float: true
+        code_folding: show
+        df_print: paged
+---
+
+
+<!--
+To compile this document
+rmarkdown::render('tutorial_proteomics_2019.Rmd');purl('tutorial_proteomics_2018.Rmd')
+rmarkdown::render('tutorial_proteomics_2019.Rmd', BiocStyle::pdf_document())
+-->
+
+```{r options, include = FALSE}
+library(knitr)
+options(digits = 3,
+        width = 80)
+opts_chunk$set(echo = TRUE, tidy = FALSE, include = TRUE,
+               dev = 'png', fig.width = 6, fig.height = 3.5,
+               comment = '  ', dpi = 300,
+               cache = TRUE, warning = FALSE)
+```
+
+
+
+# Required packages and other preparations
+
+```{r required packages, echo = FALSE, warning = FALSE, results = "hide"}
+suppressPackageStartupMessages({
+library(oligo)
+library(BiocStyle)
+library(knitr)
+library(Biobase)
+library(geneplotter)
+library(ggplot2)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(gplots)
+library(RColorBrewer)
+library(arrayQualityMetrics)
+library(stringr)
+library(matrixStats)
+library(genefilter)
+library(limma)
+library(openxlsx)
+library(smoothmest)
+library(tidyr)
+library(vsn)
+library(MSnbase)
+library(pheatmap)
+library(fdrtool)
+library(purrr)
+library(tidyverse)
+library(Hmisc)
+library(gridExtra)
+library(Peptides)
+})
+```
+
+```{r required packages and data, echo = TRUE}
+library(oligo)
+library(BiocStyle)
+library(knitr)
+library(Biobase)
+library(geneplotter)
+library(ggplot2)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(gplots)
+library(RColorBrewer)
+library(arrayQualityMetrics)
+library(stringr)
+library(matrixStats)
+library(genefilter)
+library(limma)
+library(openxlsx)
+library(smoothmest)
+library(tidyr)
+library(vsn)
+library(MSnbase)
+library(pheatmap)
+library(fdrtool)
+library(purrr)
+library(tidyverse)
+library(Hmisc)
+library(gridExtra)
+library(Peptides)
+
+glog2 <- function(x) ((asinh(x) - log(2)) / log(2))
+
+# fcuntion to retrieve annotation data from Uniprot
+
+getUniprotGoodies  <- function(query) # columns)
+{
+    ## query and columns start as a character vectors
+    qstring <- paste(query, collapse = "+or+")
+    #cstring <- paste(columns, collapse = ",")
+    uri <- 'http://www.uniprot.org/uniprot/?query = '
+    fullUri <- paste0(uri,qstring,'&format = tab')#&columns = '),cstring)
+    dat <- read.delim(fullUri, stringsAsFactors = FALSE)
+    ## now remove things that were not in the specific original query...
+    dat <- dat[dat[,1] %in% query,]
+    dat
+}
+
+
+plotProtein <- function(Acc){
+    
+    tmp <- exprs(time_data_vsn)[Acc, ]
+    pl <- (qplot(time, tmp, color = time, main = Acc) 
+            + ylab("protein_exp_log2"))
+    pl +  scale_color_brewer(type = "qual", palette = 2)
+    }
+
+
+# function to compute a robust mean 
+robustMean <- function(x){
+    if (length(x) == 1) {return(x)}
+    else{
+        return(smhuber(x)$mu)
+    } 
+}
+
+```
+
+# Overview of a typical proteomics experiment
+
+A typical proteomics experiment follows the steps depicted in the Figure below. 
+
+![Workflow of a proteomics experiment](Proteome_workflow.png)
+
+This is an example of a full proteome analysis of three different cell lines.
+The first cell line is the wildtype of HEK 293T (wt), the second cell line 
+is a CRISPR knock-out (ko) of Sphingosine-1-phosphate lyase 1 
+(SPGL1 - single_ko) and the third cell line is a double CRISPR knock-out 
+of Ceramide glucosyltransferase (UGCG) and SPGL1 (double_ko). For each 
+biological conditions, three independent replicates were generated and 
+analyzed as shown in the figure above. 
+
+
+In our case, the raw output files of the mass spectrometer were processed with 
+IsobarQuant ([Franken et. al., 2015](http://dx.doi.org/10.1038/nprot.2015.101)), 
+a software that was developed at Cellzome. 
+
+# Processing strategy
+
+## Raw data
+
+IsobarQuant gives three text files as an output, a summary.txt file, a 
+peptides.txt file and a protein.txt file. The peptides.txt and proteins.txt 
+files contain the intensities that were quantified for the different tmt 
+channels. The peptides.txt file contain the raw intentisies for each 
+identified peptide ("sig") whereas the proteins.txt file contains already 
+summarized values for each protein for which the individual peptide tmt signals 
+belonging to a particular protein were summed up ("signal_sum").
+
+## Use of intensies instead of ratios
+
+We use the intensities directly here using the following steps:
+
+1.) We first perform a glog transformation on the raw protein--intensities. 
+The glog is very similar to a standard log transform, but performs a less 
+severe shrinkage for low intensities. The figure below illustrates this point:
+
+2.) Following this, we apply the vsn algorithm to all the summarized values 
+on the protein level on the raw intensity scale (We exponentiate the summarized 
+values again). vsn essentially centers and scales the values within a channel 
+and the performs a glog transformation.
+
+3.) We finally run `r Biocpkg("limma") ` on the `r Biocpkg("vsn") ` normalized data.
+
+This is very similar to the strategy followed in [Hughes et. al., 2014](https://dx.doi.org/10.15252/msb.20145625),
+although there `r Biocpkg("vsn") ` is applied on the peptide level data and the the protein group
+summarization is performed later on.
+
+## Some reasons why it is better to not work with ratios
+
+Although ratios are widely used in proteomics, from a statistical point
+of view, it is better to use raw intensities values as their computing a ratio
+beforehand changes the distribution and especially the variance of your data
+dramatically: by dividing by a large intensity, small intensity values will
+be compressed, dividing by a small intensity will boost the values. 
+
+Also, once ratios have been formed, it is not easy to go back, thus essentially
+throwing data away.
+
+On top of that, if your experimental design becomes more complex, you can
+use full featured linear models (such as we do here) more easily 
+instead of just simple two--group comparisons. Furthermore, one can
+find batch effects and the like more readily in the data.
+
+# Experimental design
+
+In the data set at hand, we have single run with 10 TMT labels. This 
+labels cover 3 conditions with 3 replicates in each condition.
+
+We first import the table holding the experimental design.
+
+```{r impMeta}
+expDesign <- as.data.frame(read_csv("metadata.csv"))
+rownames(expDesign) <- expDesign$tmt.label
+
+expDesign
+```
+
+In the analysis below, we will only use the *wt* and *single\_ko* conditions
+in order to keep it simple.
+
+
+# Import of the raw data
+
+We first import the raw data, the protein quantifications saved as tab--separated
+file, with one column per label as well as the peptide level data.
+We extract the samples fraction from the column `source file`
+in the peptide table.
+
+```{r importData, eval = TRUE}
+peptide_data <- read_tsv("H0027_student_PEP_merged_results_20180202_1618_peptides.txt")
+
+peptide_data
+
+peptide_data$fraction <- gsub("(.+R1_)|(.raw$)", "", peptide_data$source_file)
+peptide_data$fraction <- factor(peptide_data$fraction,
+                               ordered = TRUE,
+                               levels = c("F01","F02","F03","F04","F05",
+                                        "F06","F07","F08","F09","F10",
+                                        "F11","F12"))
+
+protein_data <- read_tsv("H0027_student_PEP_merged_results_20180202_1618_proteins.txt")
+
+protein_data
+
+```
+
+
+# Quality control analysis of workflow steps
+
+In the following analysis we will analyze the `peptides.txt` file 
+and the `protein.txt` file in various ways in order to assess 
+the results of each individual step of the experimental workflow. 
+
+## Protein counts
+
+The total number of identified proteins is useful to judge the overall quality 
+of the experiment. This includes both the success of the cell lysis as 
+well as the performance of the mass spectrometer.
+
+The variable `qupm` indicates the number of peptides quantified per
+protein. We inspect how many proteins have at least 2 uniquely quantified 
+peptides.
+
+```{r totalNoProts,  warning = FALSE}
+ggplot(data = protein_data, aes(ifelse(qupm >= 2, "qupm >= 2", "qupm <2"))) +
+  geom_bar() +
+  xlab("") +
+  geom_text(stat = 'count', aes(label = ..count..), nudge_y = 500) +
+  ggtitle(paste("total number of identified proteins:", nrow(protein_data))) +
+  coord_flip() +
+  theme_bw(base_size = 12)
+```
+
+
+## Measurement of protein concentration
+
+Prior to TMT labeling, the protein concentration of each sample is measured 
+and the protein amount for the proteomics experiment might be adapted if needed. 
+The distribution of the signal sums of all proteins for each TMT channel
+is a good  estimate of the protein concentration in each sample.
+
+```{r protConc,  warning = FALSE}
+sub <- protein_data %>%
+  dplyr::select(starts_with("signal_sum")) %>%
+  gather()
+
+ggplot(data = sub,aes(gsub("signal_sum_","",key), log2(value))) +
+  geom_boxplot() +
+  xlab("TMT-label") + ylab("log2(signal_sum)") +
+  ggtitle("overview of log2(signal_sum) distributions") +
+  theme_bw(base_size = 12)
+
+rm(sub)
+```
+
+We can see that label 131L has a very low signal intensity compared 
+to the rest of the channels. This is expected, as this label was not used 
+in the experiment.
+
+## Reduction and alkylation of cysteines
+
+The 'modifications' column of the peptides.txt output file of IsobarQuant 
+contains an overview of the identified modifications for each peptide. 
+The count statistic of the various modifications enables us to judge both the 
+reduction and alkylation step of Cysteines, as well as the labeling with the TMT 
+reagents.
+
+```{r pepMods}
+mods <- peptide_data$modifications
+mods <- gsub("[0-9]+;",";",mods)
+mods <- gsub(";$","",mods)
+mods <- unlist(strsplit(mods,split = "; "))
+mods <- na.omit(mods)
+
+qplot(mods,geom = "bar") +
+  coord_flip() +
+  ggtitle("total number of identified peptide modifications") +
+  theme_bw(base_size = 12)
+```
+
+Cysteines are first reduced with Dithiothreitol (DTT) and then alkylated with 
+Iodoacetamide (IAA) in order to destroy disulfide bridges between them. They 
+would otherwise link peptides together.
+
+The reduction and alkylation results in a carbamidomethyl 
+group attached to the sulphur of the cysteine side chains. This is a peptide 
+modification that is included into the mascot search.
+Therefore, this modification can be found in the 'modifications' column. Missing
+carbamidomethyl modification could indicate problems with the reduction and 
+alkylation step of the protocol.
+
+Furthermore, TMT labels are identified on the N-terminus as well as on lysine 
+side-chains. This is because they are attached via an succinimidylester which is 
+reactive to amino groups. Those are present on the N-terminus of peptides as 
+well as on the lysine side chains.
+
+
+## Tryptic digest
+
+Trypsine is used to digest the proteins into smaller peptides. 
+The enzyme cleaves after an arginine (R) or a lysine (K). 
+
+From the identified sequences in the peptides table, we can count
+how often an arginine or a lysine  appears inside the sequence. 
+ 
+We interpret this the number of miscleavages as a performance measure 
+for the tryptic digest.
+
+```{r trypticDigest}
+peptide_data <- peptide_data %>%
+  mutate(sequence = toupper(sequence)) %>%
+  mutate(no.of.miscleavages = gsub("[K,R]$","",sequence)) %>%
+  mutate(no.of.miscleavages = gsub("[^KR]","",no.of.miscleavages)) %>%
+  mutate(no.of.miscleavages = nchar(no.of.miscleavages))
+
+bar_pl <- ggplot(data = peptide_data, aes(x = no.of.miscleavages)) +
+  stat_count()
+
+bar_data <- layer_data(bar_pl, 1) %>%
+  mutate(prop_rounded = paste0(round(prop, 3)*100, "%"))
+
+ggplot(data = bar_data, aes(x = x, y = y)) +
+  geom_bar(stat = "identity") +
+  geom_text(mapping = aes(x = x, y = y, label = prop_rounded), 
+            nudge_y = 10000) +
+  xlab("number of miscleavages") +
+  ylab("number of peptides") +
+  theme_bw(base_size = 12)
+
+```
+
+
+Furthermore, the distribution of peptide lengths is another way to judge 
+the quality of the tryptic digest. The minimum peptide length required for 
+quantification is 5, so peptides used in the quantification step should
+typically be longer.
+
+```{r peptideLengths}
+ggplot(data = peptide_data, aes(nchar(sequence))) +
+  geom_bar() +
+  xlab("peptide lengths [aa]") +
+  ylab("number of peptides") + 
+  facet_wrap(~ifelse(in_quantification_of_protein == 1, 
+                     "peptides used for protein quantification", 
+                     "peptides not used for protein quantification"), 
+             ncol = 1) +
+  theme_bw(base_size = 12)
+```
+
+
+## TMT based quantification vs MS 1 peak
+
+In order to judge the TMT labeling efficiency, one can correlate the ms1 peak intensities with the sum of all tmt signals for each identified peptide.
+
+Those two values should correlate. We first compute the sum the 
+TMT labels and then create a scatterplot of this and the MS1 peak.
+
+```{r TMTvsMS1, warning = FALSE}
+peptide_data$sig_sum <- peptide_data %>%
+  dplyr::select(starts_with("sig")) %>%
+  apply(1, sum, na.rm = TRUE)
+
+scp <- ggplot(data = subset(peptide_data,in_quantification_of_protein == 1),
+       mapping = aes(log2(peak_intensity), log2(sig_sum))) +
+  stat_bin2d(binwidth = 0.2) +
+  scale_fill_gradientn(colours = c("#377eb8","#984ea3","#e41a1c",
+                                   "#ff7f00","#ffff33")) +
+  xlab("log2(ms1-peak intensity)") +
+  ylab("log2(sum of TMT-label signal)") 
+
+scp + 
+  annotate("text", label = paste0("Cor: ", 
+                                  round(cor(layer_data(scp)$x,
+                                            layer_data(scp)$y, 
+                                            method = "spearman"), 2)),
+           x = 22, y = 32, size = 5, colour = "coral3") +
+  theme_bw(base_size = 12)
+```
+
+We can see that these values are reasonably correlated to each other. Otherwise, 
+this could indicate problems with the TMT labeling.
+
+## Prefractionation and chromatography
+
+Prefractionation of the input samples, results in 12 different fractions. 
+Each of them was injected into the mass spectrometer separetely producing a ms1 
+spectrum, which we plot now:
+
+```{r plotMS1Fracs, fig.height = 18, fig.width = 15}
+ggplot(data = subset(peptide_data, in_quantification_of_protein == 1),
+       aes(`retention time`, peak_intensity)) +
+  geom_line() +
+  facet_wrap(~fraction) +
+  theme_bw(base_size = 12)
+```
+
+In order to judge the performance of the instrument, we plot the number 
+of peptide identifications in the different fractions.
+
+We also distinguish between peptides used / not used for the  
+final quantification.
+
+```{r pepsPerFrac}
+ggplot(data = peptide_data, 
+       aes(fraction, fill = ifelse(in_quantification_of_protein == 1,
+                                   "quantified","not quantified"))) +
+       geom_bar(position = position_dodge()) + 
+       xlab("fraction") +
+       ggtitle(paste("total number of identified peptides:", 
+                     nrow(protein_data))) +
+       scale_fill_brewer(palette = "Set1", name = "") +
+  theme_bw(base_size = 12)
+```
+
+Fractions 7, 8 and 9 show smaller numbers of identified peptides. Here, the 
+fractionation could possibly be optimized.
+
+For each mass spec run, the peptides are seperated with a C18 column. 
+The next plot shows the frequency of which the peptides 
+are eluted from the column in each fraction.
+
+```{r C18column}
+ggplot(data = subset(peptide_data,in_quantification_of_protein == 1),
+       aes(`retention time`, fraction)) +
+  stat_bin2d(binwidth = 1) +
+  scale_fill_gradientn(colors = c("#377eb8","#984ea3","#e41a1c",
+                                  "#ff7f00","#ffff33")) +
+  xlab("retention time [min]") +
+  theme_bw(base_size = 12)
+```
+
+The prefractionation took place at a much higher pH, resulting in the 
+deprotonation of certain peptide residues. Therefore, the peptides were 
+seperated based on their isoelectric point (pI). The isolectric point indicates 
+the pH on which the peptide has a neutral net charge. Changing the pH changes 
+the total charge of the peptide and thereby the interaction with the C18 column.
+This can be visualized by computing the pI for each peptide  and summarizing the
+average pI per retention time for each fraction.
+
+```{r pIHeat}
+peptide_data$pI <- Peptides::pI(peptide_data$sequence)
+ggplot(data = subset(peptide_data,in_quantification_of_protein == 1),
+       aes(`retention time`,fraction)) +
+  stat_summary_2d(aes(z = pI),binwidth = 0.5) +
+  scale_fill_gradientn(colours = c("#377eb8","#984ea3","#e41a1c",
+                                   "#ff7f00","#ffff33"),
+                       name = "isoelectric point pI") +
+  xlab("retention time [min]") +
+  ggtitle("prefractionation efficiency",
+          subtitle = "by isoelectic point") +
+  theme_bw(base_size = 12)
+```
+
+A C18 column also seperates peptides based on their hydrophobicity. 
+To visualize this, one can calculate a hydrophobicity score 
+for each peptide and show again the average for a specific retention time.
+
+```{r hydrophobicityHeat}
+peptide_data$gravy <- Peptides::hydrophobicity(peptide_data$sequence)
+ggplot(data = subset(peptide_data, in_quantification_of_protein == 1),
+       aes(`retention time`,fraction)) +
+  stat_summary_2d(aes(z = gravy), binwidth = 0.5) +
+  scale_fill_gradientn(colours = c("#377eb8","#984ea3","#e41a1c",
+                                   "#ff7f00","#ffff33"),
+                       name = "hydrophobicity (gravy score)") +
+  xlab("retention time [min]") +
+  ggtitle("prefractionation efficiency", 
+          subtitle = "by hydrophobicity") +
+  theme_bw(base_size = 12)
+```
+
+The cumulative sum of unique protein ids over 
+the different fractions is helpful to judge the
+the gain of depth for the various fractions.
+
+This gain will be decreasing with an increasing number of
+fractions.
+
+```{r fracGain}
+id_data <- NULL
+
+pfractions <- levels(peptide_data$fraction)
+for (i in seq_along(pfractions)) {
+  sub <- subset(peptide_data,fraction %in% pfractions[1:i] &
+                  in_quantification_of_protein == 1)
+  if (nrow(sub) > 0) {
+    id_sub <- data.frame(fraction = pfractions[i],
+                       unique.ids = length(unique(sub$protein_id)))
+    id_data <- rbind(id_data,id_sub)
+    rm(id_sub)
+  }
+}
+
+id_data$fraction <- factor(id_data$fraction,
+                         ordered = TRUE, levels = pfractions)
+id_data$file <- "file"
+ggplot(data = id_data, aes(fraction,unique.ids)) +
+  geom_line(aes(group = file)) +
+  geom_point() +
+  ggtitle(label = "cum. sum of unique protein id's vs number of fractions") +
+  theme_bw(base_size = 12)
+```
+
+
+## Peptide identification
+
+### Mascot score
+
+Each identified ms2 spectrum is annotated to a specific peptide sequence. 
+The quality of the annotation is quantified by a mascot score, a probability-
+based scoring system. The better the quality of the  identification, 
+the higher the score.
+Peptides which were used for the protein quantification 
+have a higher mascot score than the ones not used.
+Their scores have a lower bound of 20, our quality cut--off.
+
+```{r mascotScores}
+ggplot(data = peptide_data,aes(score,
+       fill = factor(in_quantification_of_protein))) +
+  geom_density(aes(y = ..count..), alpha = 0.5) +
+  theme_bw(base_size = 12) +
+  scale_fill_brewer(palette = "Set1", name = "used for quant")
+```
+
+One determining factor to the mascot score is the peptide length. 
+Longer peptides tend to have a better identification quality 
+since they result in more ion fragments.
+
+```{r lengthVSscore}
+scp_mascot <- ggplot(data = subset(peptide_data, 
+                   in_quantification_of_protein == 1), 
+       aes(nchar(sequence),score)) +
+  stat_bin2d(binwidth = 1) +
+  geom_smooth(method = "lm") +
+  scale_fill_gradientn(colours = 
+                         c("#377eb8","#984ea3",
+                           "#e41a1c","#ff7f00","#ffff33")) +
+  xlab("length of peptide [aa]")
+
+scp_mascot + 
+  annotate("text", label = paste0("Cor: ", 
+                                  round(cor(layer_data(scp_mascot)$x,
+                                            layer_data(scp_mascot)$y, 
+                                            method = "spearman"), 2)),
+           x = 15, y = 190, size = 5, colour = "coral3") +
+  theme_bw(base_size = 12)
+```
+
+### Number of unique peptides per protein
+
+There is a different number of unique peptides identified for each protein.
+
+```{r uniquePepPerProt}
+ggplot(data = subset(protein_data,qupm >= 2), aes(qupm)) +
+  geom_bar() +
+  theme_bw(base_size = 12)
+```
+
+This depends on two things: The length of the protein and its molecular weight:
+
+```{r weightVSpeptides, warning = FALSE}
+scp_mw <- ggplot(data = subset(protein_data, qupm >= 2),
+       aes(as.numeric(as.character(mw)), upm)) +
+  geom_point( alpha = I(0.1)) +
+  geom_smooth(method = "loess") +
+  scale_fill_gradientn(colours = c("#377eb8","#984ea3",
+                                   "#e41a1c","#ff7f00","#ffff33")) +
+  xlab("molecular weigth [Da]") +
+  ylab("unique peptides per protein")
+scp_mw + 
+  annotate("text", label = paste0("Cor: ", 
+                                  round(cor(layer_data(scp_mw)$x,
+                                            layer_data(scp_mw)$y,
+                                            use = "pairwise.complete.obs",
+                                            method = "spearman"), 2)),
+           x = 1e5, y = 190, size = 5, colour = "coral3") +
+  theme_bw(base_size = 12)
+```
+
+As well as the abundance of the protein in the sample.
+
+```{r abunVSpeptides, warning = FALSE}
+scp_top3 <- ggplot(data = subset(protein_data,qupm >= 2),aes(top3,upm)) +
+  geom_point(alpha = I(0.1) ) +
+  geom_smooth(method = "loess") +
+  scale_fill_gradientn(colours = c("#377eb8","#984ea3","#e41a1c",
+                                   "#ff7f00","#ffff33")) +
+  xlab("top3 [abundance]") +
+  ylab("unique peptides per protein")
+scp_top3 + 
+  annotate("text", label = paste0("Cor: ", 
+                                  round(cor(layer_data(scp_top3)$x,
+                                            layer_data(scp_top3)$y,
+                                            use = "pairwise.complete.obs",
+                                            method = "spearman"), 2)),
+           x = 6.5, y = 190, size = 5, colour = "coral3") +
+  theme_bw(base_size = 12)
+```
+
+
+#Statistical analysis
+
+##Filter protein data
+
+Identified proteins which are known to be a contaminant as well as proteins 
+for which the TMT quantification is based on less than two unique peptides 
+(qupm) are removed.
+
+```{r filterProt}
+protein_data <- protein_data %>%
+  filter(!grepl("###",gene_name), qupm >= 2)
+```
+
+
+## Extract intensity data as matrix
+
+We gather the protein intensity data in a data matrix. The columns
+interesting to us start with `signal sum` and then the respective TMT
+label. We discard the label `131L` as this does not correspond to a sample
+in our data.
+
+We remove the `signal_sum_` part from the sample labels in order
+to match the `tmt.label` column in the experimental Design table.
+
+```{r getIntensityData}
+prot_matrix <- dplyr::select(protein_data,
+                             signal_sum_126:signal_sum_130H) %>%
+               as.matrix()
+
+colnames(prot_matrix) <- str_remove(colnames(prot_matrix), "signal_sum_")
+rownames(prot_matrix) <- protein_data$protein_id 
+
+
+stopifnot(colnames(prot_matrix)  == expDesign$tmt.label[-length(expDesign$tmt.label)])
+
+
+ 
+to_exclude <- apply(prot_matrix, 1, function(x){any(!is.finite(x))})
+table(to_exclude)
+
+prot_matrix <- prot_matrix[!to_exclude, ]
+
+head(prot_matrix)
+```
+
+## Prepare a feature annotation 
+
+We now create another matrix holding the protein annotation.
+
+```{r fData}
+feature_anno <- as.matrix(dplyr::select(protein_data, protein_id, gene_name,
+                              top3, qupm, description))
+
+rownames(feature_anno) <- protein_data$protein_id
+
+feature_anno <- as.data.frame(feature_anno)[!to_exclude, ]
+```
+
+
+
+
+## Create an expressionSet
+
+We now join the replicates and add annotation data. We then turn the data into
+an **expressionSet**. 
+
+### About Bioconductor ExpressionSets
+
+Genomic and proteomic data can be very complex,
+usually consisting of a number of different bits and pieces, e.g. information
+on the experimental samples, annotation of genomic features measured as well
+as the experimental data itself
+In Bioconductor the approach is taken that these  pieces should be stored in
+a single structure to easily manage the data.
+
+The package `r Biocpkg("Biobase")` contains standardized data structures
+to represent genomic data. The `ExpressionSet` class is designed
+to combine several different sources of information into a single convenient
+structure. An ExpressionSet can be manipulated (e.g., subsetted, copied),
+and is the input to or output of many Bioconductor functions.
+
+The data in an ExpressionSet consist of
+
++ **assayData**: Expression data.
+
++ **metaData**: A description of the samples in the experiment
+(phenoData), metadata about the features/proteins (featureData), 
+and further annotations for the proteins, for example
+gene annotations from biomedical databases (annotation).
+
++ **experimentData**: A flexible structure to describe the experiment.
+
+The ExpressionSet class coordinates all of these data, so that one does not 
+have to worry about the details. However, some constrains have to be met. 
+In particular, the rownames of the `phenoData` 
+have to match the column names of the assay data (as they represent the sample 
+identifiers), while the row names of the expression data have to match the 
+row names of the `featureData` (as they represent the feature identifiers). 
+This is illustrated in the figure.
+
+```{r sumexp, echo = FALSE, fig.show = "asis"}
+par(mar = c(0,0,0,0))
+plot(1,1,xlim = c(0,100),ylim = c(0,100),bty = "n",
+     type = "n",xlab = "",ylab = "",xaxt = "n",yaxt = "n")
+polygon(c(45,80,80,45),c(10,10,70,70),col = rgb(1,0,0,.5),border = NA)
+polygon(c(45,80,80,45),c(68,68,70,70),col = rgb(1,0,0,.5),border = NA)
+text(62.5,40,"assay(s)", cex = 1)
+text(62.5,30,"e.g. 'exprs'", cex = 1)
+polygon(c(20,40,40,20),c(10,10,70,70),col = rgb(0,0,1,.5),border = NA)
+polygon(c(20,40,40,20),c(68,68,70,70),col = rgb(0,0,1,.5),border = NA)
+text(30,40,"featureData", cex = 1)
+polygon(c(45,80,80,45),c(75,75,90,90),col = rgb(.5,0,.5,.5),border = NA)
+polygon(c(45,47,47,45),c(75,75,90,90),col = rgb(.5,0,.5,.5),border = NA)
+text(62.5,82.5,"phenoData", cex = 1)
+```
+
+### Creating the ExpressionSet
+
+You can use the functions ` pData ` and ` fData ` to extract
+the sample and feature annotation respectively from an ` ExpressionSet `.
+The function ` exprs ` will return the expression data itself as a matrix.
+
+We can now combine the data into an ` ExpressionSet ` object.
+
+
+```{r createEset, dependson = "summarizeData", eval = TRUE}
+
+eset_raw <- ExpressionSet(prot_matrix, 
+                   phenoData = AnnotatedDataFrame(expDesign[-nrow(expDesign),]),
+                   featureData = AnnotatedDataFrame(feature_anno))
+  
+validObject(eset_raw)
+pData(eset_raw)
+
+# prots with very low expression / zero expression 
+strange_prots <- apply(exprs(eset_raw), 1, function(x){min(x) < 1})
+eset_raw <- eset_raw[!strange_prots, ]
+save(eset_raw, file = "eset_raw.RData")
+
+```
+
+
+
+## Quality control of the raw data
+
+## Array quality metrics report of the raw data
+
+The package `r Biocpkg("arrayQualityMetrics") `  produces an html report, containing lots of 
+quality control plots together with a description of their
+aims. We  check our raw data using this reporting tool.
+
+
+```{r  arrayQualityMetricsRaw, eval = FALSE}
+try(arrayQualityMetrics(expressionset = eset_raw, 
+      outdir = "Report_for_eset_raw",
+    force = TRUE,
+    do.logtransform = TRUE,
+   intgroup = c("condition", "rep")
+))
+
+```
+
+We can see a clear clustering by  by replicate, rep3 of WT seems 
+to be an outlier on the PCA plot.
+
+
+## vsn normalization and feature annotation
+
+vsn (variance stabilization transformation, `r Biocpkg("vsn") `) is a Microarray
+normalization algorithm
+that performs background correction and normalization by robustly
+shifting and scaling intensity values within a sample before glog--transforming
+them. This is less "severe" than quantile normalization. 
+vsn does perform a robust within--sample centering and scaling.
+
+It is useful in general for intensity based data, e.g. also proteomics,
+see [Hughes et. al., 2014](https://dx.doi.org/10.15252/msb.20145625) for an 
+example usage in proteomics .
+
+
+We first create boxplots for the raw data.
+
+```{r boxplotRaw}
+oligo::boxplot(eset_raw, transfo = log2, range = 0)
+```
+
+We can see that there only very minor differences 
+between the different samples in the 
+tags in the raw data are quite minimal in our example data.
+
+Nonetheless, we use vsn to normalize the data an create
+another set of boxplots.
+
+```{r vsnNorm, dependson = "createEset"}
+vsn_fit <- vsn2(eset_raw)
+eset_vsn <- predict(vsn_fit, newdata = eset_raw)
+
+oligo::boxplot(eset_vsn, transfo = identity)
+
+save(eset_vsn, file = "eset_vsn.RData")
+```
+
+As expected both boxplots are quite similar to each other.
+
+
+### check array quality metrics again 
+
+We now check the normalized data again.
+
+
+```{r  arrayQualityMetricsAfterVSN, eval = FALSE}
+try(arrayQualityMetrics(expressionset = eset_vsn, 
+      outdir = "Report_for_eset_after_vsn",
+    force = TRUE,
+    do.logtransform = FALSE,
+   intgroup = c("condition", "rep")
+))
+
+```
+
+
+
+## PCA plots of the normalized data
+
+### PCA using the most variable proteins
+
+We now look at a PCA plot. Fist, we perform a simple variable selection
+and use only the top variable proteins for the computation of the principal
+components.
+
+
+```{r topVarPCA, dependson = "vsn_norm", eval = TRUE}
+
+ntop <- 500
+
+Pvars <- rowVars(exprs(eset_vsn))
+select <- order(Pvars, decreasing = TRUE)[seq_len(min(ntop, 
+        length(Pvars)))]
+PCA <- prcomp(t(exprs(eset_vsn)[select, ]), scale = TRUE)
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+
+
+dataGG = data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], 
+                    PC3 = PCA$x[,3], PC4 = PCA$x[,4], 
+                    replicate = pData(eset_vsn)$rep, 
+                    condition = pData(eset_vsn)$condition)
+                  
+(qplot(PC1, PC2, data = dataGG, color =  condition, 
+       main = "PC1 vs PC2, top variable proteins", size = I(6), 
+       shape = replicate)
+ + labs(x = paste0("PC1, VarExp:", round(percentVar[1],4)),
+        y = paste0("PC2, VarExp:", round(percentVar[2],4)))
+ + scale_colour_brewer(type = "qual", palette = 2)
+ )
+
+
+```
+
+The PCA plot shows a very separation between the experimental
+conditions.
+
+## Limma analysis 
+
+We now perform a differential analysis using `r Biocpkg("limma") `.
+We first create a design matrix that then allows us to compare
+between the differnt conditions. Here, the intercept 
+represent the WT baseline, and the other coefficients represent
+the fold changes. See the limma user guide, chapter 9 for
+further details on typical designs.
+
+<http://bioconductor.org/packages/release/bioc/vignettes/limma/inst/doc/usersguide.pdf>
+
+
+```{r createDesign, eval = TRUE}
+condition <- as_factor(pData(eset_vsn)$condition )
+des <- model.matrix(~ condition)
+colnames(des) <- str_remove(colnames(des), "condition")
+des
+```
+
+
+###  Comparison of WT vs single KO
+
+As we have a coefficient, `"single_ko"` that encodes the 
+the fold change between WT the single knockout.
+
+The result we get is a big table, with all significant proteins and a short
+description of what they are doing.
+
+```{r compare_to_time0, dependson = "createDesign", eval = TRUE}
+
+lm_fit <- eBayes(lmFit(eset_vsn, design = des))
+            
+limma_table <- topTable(lm_fit, sort.by = "t",  coef = "single_ko",
+                        number = Inf)
+
+as.tibble(limma_table)
+
+
+table(limma_table$adj.P.Val < 0.0001)
+```
+
+Here, we use a very stringent FDR cutoff of 0.0001 (represented by
+the "adjusted" p--value). The FDR is 
+proportion of false positives in our hit list, this means we have 
+0.0001 * 37 = `r 0.0001 * 37`, so almost zero false positives 
+in this list.
+
+```{r pvalHist}
+hist(limma_table$P.Value, col = "lavender")
+```
+
+Another very important diagnostic is the p--value histogram: if 
+everything worked well, we should have a uniform background of
+p--values (non--differentially abundant proteins) and a peak near
+zero representing the differentially abundant proteins.
+
+Unsual p--value histogram can point to batch effects and 
+variance estimation issues.
+
+### Volcano plot
+
+We now visualize the the results of the differential expression
+analysis in a Volcano plot, where we plot the log2 fold change vs the
+-log10 p--value. This allows us to assess statistical significance and
+effect size simultaneously.
+
+The p--values should related to the fold changes, but not directly
+correlated, as the p--values are (apart from the fold change) also
+based on the protein variance and sample size.
+
+```{r volcPlot}
+ggplot(data = limma_table,aes(logFC,-log10(P.Value))) +
+  geom_point(alpha = I(0.5)) +
+  geom_vline(xintercept = 0) +
+  xlab("log2(fold change)") +
+  geom_text(data = subset(limma_table, adj.P.Val <= 0.0001), 
+            aes(label = gene_name),
+            size = 2,nudge_y = 0.15,check_overlap = TRUE) +
+  ggtitle("volcano plot", subtitle = "single_ko vs wt")
+```
+
+### MA-plot
+
+We can also visualize the results in an MA plot. It plots the average
+protein abundance (log2 scale) vs. the log2 fold change. This allows
+us to see whether our differences between the conditions depend on 
+the protein abundance. 
+
+
+```{r MAplot}
+ggplot(data = limma_table,aes(AveExpr, logFC)) +
+  geom_point(alpha = I(0.2)) +
+  geom_hline(yintercept = 0) +
+  ylab("log2(fold change)") +
+  geom_text(data = subset(limma_table,adj.P.Val <= 0.0001), 
+            aes(label = gene_name),
+            size = 2, nudge_y = 0.08,check_overlap = TRUE) +
+  ggtitle("MA plot",subtitle = "single_ko vs wt")
+```
+
+From the plot, we can see that our differentially abundant proteins
+are also abundant, and that there are no systematic biases between
+the experimental conditions. 
+
+### Top3 vs logFC
+
+Here, we plot the top3 value as reported by IsobarQuant against
+the fold change. The top3 value is a measure of abundance computed
+from the top3 MS1 peptide--peaks for a protein (mean of 
+log10 intensities; the top3 peptides can be found in the 
+peptides file). Again, we see that our 
+hits are not in the low abundance range.
+
+```{r top3VSlogFC}
+ggplot(data = limma_table, 
+       aes(logFC,as.numeric(as.character(top3)))) +
+  geom_point(alpha = I(0.2)) +
+  geom_vline(xintercept = 0) +
+  xlab("log2(fold change)") +
+  ylab("top3 [abundance]") +
+  geom_text(data = subset(limma_table,adj.P.Val <= 0.0001),
+            aes(label = gene_name),
+            size = 2, nudge_y = 0.08,check_overlap = TRUE) +
+  ggtitle("top3 plot",subtitle = "single_ko vs wt")
+```
+
+Note that both this and the previous plot would not possible 
+to if we were working with ratios.
+
+# Session Info
+
+```{r seesionInfo, results = 'markup'}
+sessionInfo()
+```
