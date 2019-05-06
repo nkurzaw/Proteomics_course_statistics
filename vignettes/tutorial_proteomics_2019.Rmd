@@ -3,13 +3,13 @@ title: "Statistical Analysis of Proteomics data"
 author: "Frank Stein, Nils Kurzawa and Bernd Klaus"
 date: "`r doc_date()`"
 output: 
-    BiocStyle::pdf_document:
-        toc: true
     BiocStyle::html_document:
         toc: true
         toc_float: true
         code_folding: show
         df_print: paged
+    BiocStyle::pdf_document:
+        toc: true
 ---
 
 
@@ -170,7 +170,7 @@ We use the intensities directly here using the following steps:
 
 1.) We first perform a glog transformation on the raw protein--intensities. 
 The glog is very similar to a standard log transform, but performs a less 
-severe shrinkage for low intensities. The figure below illustrates this point:
+severe shrinkage for low intensities. 
 
 2.) Following this, we apply the vsn algorithm to all the summarized values 
 on the protein level on the raw intensity scale (We exponentiate the summarized 
@@ -920,7 +920,7 @@ des
 ###  Comparison of WT vs single KO
 
 As we have a coefficient, `"single_ko"` that encodes the 
-the fold change between WT the single knockout.
+the fold change between WT the single knockout, we can test for its significance.
 
 The result we get is a big table, with all significant proteins and a short
 description of what they are doing.
@@ -958,7 +958,7 @@ variance estimation issues.
 
 ### Volcano plot
 
-We now visualize the the results of the differential expression
+We now visualize the results of the differential expression
 analysis in a Volcano plot, where we plot the log2 fold change vs the
 -log10 p--value. This allows us to assess statistical significance and
 effect size simultaneously.
