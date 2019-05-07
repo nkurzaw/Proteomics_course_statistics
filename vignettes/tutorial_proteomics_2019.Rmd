@@ -164,18 +164,16 @@ identified peptide ("sig") whereas the proteins.txt file contains already
 summarized values for each protein for which the individual peptide tmt signals 
 belonging to a particular protein were summed up ("signal_sum").
 
-## Use of intensies instead of ratios
+## Use of intensities instead of ratios
 
 We use the intensities directly here using the following steps:
 
-1.) We first perform a glog transformation on the raw protein--intensities. 
-The glog is very similar to a standard log transform, but performs a less 
-severe shrinkage for low intensities. 
+1.) We first perform a log2 transformation on the raw protein--intensities. 
 
 2.) Following this, we apply the vsn algorithm to all the summarized values 
 on the protein level on the raw intensity scale (We exponentiate the summarized 
 values again). vsn essentially centers and scales the values within a channel 
-and the performs a glog transformation.
+and the performs a log2 transformation.
 
 3.) We finally run `r Biocpkg("limma") ` on the `r Biocpkg("vsn") ` normalized data.
 
@@ -807,7 +805,7 @@ to be an outlier on the PCA plot.
 vsn (variance stabilization transformation, `r Biocpkg("vsn") `) is a Microarray
 normalization algorithm
 that performs background correction and normalization by robustly
-shifting and scaling intensity values within a sample before glog--transforming
+shifting and scaling intensity values within a sample before log2--transforming
 them. This is less "severe" than quantile normalization. 
 vsn does perform a robust within--sample centering and scaling.
 
@@ -819,7 +817,9 @@ example usage in proteomics .
 We first create boxplots for the raw data.
 
 ```{r boxplotRaw}
-oligo::boxplot(eset_raw, transfo = log2, range = 0)
+eset_temp <- eset_raw
+exprs(eset_temp) <- log2(exprs(eset_temp))
+oligo::boxplot(eset_temp, transfo = identity)
 ```
 
 We can see that there only very minor differences 
